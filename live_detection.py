@@ -18,11 +18,8 @@ BALL_CLASSES = [
 
 IMAGE_SIZE = (192, 192)
 MODEL_PATH = 'Ball_sport_classifier.h5'
-CONFIDENCE_THRESHOLD = 0.5  # Increased to reduce false detections
-WINDOW_SIZE = 192
-STEP_SIZE = 128  # Increased step size for fewer overlapping windows
 
-# Colors for bounding boxes (RGB)
+# Colors for display (RGB)
 COLORS = {
     'basketball': (255, 140, 0),
     'billiard_ball': (255, 255, 255),
@@ -42,7 +39,7 @@ class SimpleBallDetector:
         
         self.model = None
         self.current_image = None
-        self.detections = []
+        self.prediction_result = None
         
         self.load_model()
         self.create_ui()
@@ -92,7 +89,7 @@ class SimpleBallDetector:
         # Upload button
         upload_btn = tk.Button(
             self.root,
-            text="📁 Upload Image",
+            text="📁 Upload Ball Image",
             command=self.upload_image,
             font=("Arial", 14, "bold"),
             bg="#27ae60",
@@ -106,7 +103,7 @@ class SimpleBallDetector:
         # Status label
         self.status_label = tk.Label(
             self.root,
-            text="Upload an image to detect balls",
+            text="Upload an image of a ball to identify it",
             font=("Arial", 12),
             bg='#2c3e50',
             fg='#95a5a6'
@@ -114,7 +111,7 @@ class SimpleBallDetector:
         self.status_label.pack(pady=5)
         
         # Image canvas with scrollbar
-        canvas_frame = tk.Frame(self.root, bg='#34495e')
+        canvas_frame = tk.Frame(self.root, bg='#34495e', relief=tk.SUNKEN, bd=2)
         canvas_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
         
         # Scrollbars
@@ -135,19 +132,34 @@ class SimpleBallDetector:
         h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Results text
-        results_frame = tk.Frame(self.root, bg='#2c3e50')
-        results_frame.pack(pady=10, padx=20, fill=tk.X)
-        
-        self.results_label = tk.Label(
-            results_frame,
-            text="",
-            font=("Arial", 14, "bold"),
+        # Results frame with scrollable text
+        results_frame = tk.LabelFrame(
+            self.root,
+            text="Detection Results",
+            font=("Arial", 12, "bold"),
             bg='#2c3e50',
             fg='#ecf0f1',
-            justify=tk.LEFT
+            padx=10,
+            pady=10
         )
-        self.results_label.pack()
+        results_frame.pack(pady=10, padx=20, fill=tk.BOTH)
+        
+        # Results text with scrollbar
+        text_scroll = tk.Scrollbar(results_frame)
+        text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_text = tk.Text(
+            results_frame,
+            height=8,
+            width=80,
+            font=("Courier New", 11),
+            bg='#34495e',
+            fg='#ecf0f1',
+            state=tk.DISABLED,
+            yscrollcommand=text_scroll.set
+        )
+        self.results_text.pack(fill=tk.BOTH, expand=True)
+        text_scroll.config(command=self.results_text.yview)
     
     def upload_image(self):
         """Handle image upload and detection"""
@@ -164,24 +176,27 @@ class SimpleBallDetector:
             return
         
         try:
-            self.status_label.config(text="🔍 Detecting balls...", fg='#3498db')
+            self.status_label.config(text="🔍 Analyzing ball...", fg='#3498db')
             self.root.update()
             
-            # Load and detect
+            # Load image
             self.current_image = Image.open(file_path).convert('RGB')
-            self.detections = self.detect_balls(self.current_image)
             
-            # Draw detections
-            annotated_image = self.draw_detections(self.current_image.copy(), self.detections)
+            # Detect ball type
+            self.prediction_result = self.detect_ball(self.current_image)
             
-            # Display image at full size
+            # Annotate and display image
+            annotated_image = self.annotate_image(self.current_image.copy())
             self.display_image(annotated_image)
             
             # Show results
             self.show_results()
             
+            ball_name = BALL_CLASSES[self.prediction_result['predicted_class']]
+            confidence = self.prediction_result['confidence'] * 100
+            
             self.status_label.config(
-                text=f"✓ Found {len(self.detections)} ball(s)",
+                text=f"✓ Detected: {ball_name.upper()} ({confidence:.1f}% confidence)",
                 fg='#27ae60'
             )
         
@@ -189,180 +204,222 @@ class SimpleBallDetector:
             messagebox.showerror("Error", f"Detection failed:\n{str(e)}")
             self.status_label.config(text="❌ Detection failed", fg='#e74c3c')
     
-    def detect_balls(self, image):
-        """Detect balls using sliding window with improved NMS"""
+    def detect_ball(self, image):
+        """Detect ball type from full image"""
         if self.model is None:
-            raise ValueError("Model is not loaded. Cannot perform detection.")
+            raise ValueError("Model is not loaded.")
         
-        img_array = np.array(image)
-        height, width = img_array.shape[:2]
+        # Resize image to model input size
+        img_resized = image.resize(IMAGE_SIZE, Image.Resampling.LANCZOS)
+        img_array = np.array(img_resized) / 255.0
+        img_batch = np.expand_dims(img_array, axis=0)
         
-        detections = []
+        # Make prediction
+        predictions = self.model.predict(img_batch, verbose=0)[0]
         
-        # Only use single scale for cleaner detection
-        scale = 1.0
-        scaled_array = img_array
+        # Get predicted class and confidence
+        predicted_class = np.argmax(predictions)
+        confidence = predictions[predicted_class]
         
-        # Slide window with larger steps to reduce overlaps
-        for y in range(0, height - WINDOW_SIZE + 1, STEP_SIZE):
-            for x in range(0, width - WINDOW_SIZE + 1, STEP_SIZE):
-                window = scaled_array[y:y+WINDOW_SIZE, x:x+WINDOW_SIZE]
-                
-                # Predict
-                window_normalized = window / 255.0
-                window_batch = np.expand_dims(window_normalized, axis=0)
-                predictions = self.model.predict(window_batch, verbose=0)[0]
-                
-                predicted_class = np.argmax(predictions)
-                confidence = predictions[predicted_class]
-                
-                if confidence >= CONFIDENCE_THRESHOLD:
-                    detections.append({
-                        'class': predicted_class,
-                        'confidence': confidence,
-                        'bbox': (x, y, x + WINDOW_SIZE, y + WINDOW_SIZE)
-                    })
+        # Sort all predictions by confidence
+        sorted_indices = np.argsort(predictions)[::-1]
         
-        # Apply stricter NMS to remove overlaps
-        return self.remove_overlaps(detections, iou_threshold=0.5)
+        return {
+            'predicted_class': predicted_class,
+            'confidence': confidence,
+            'all_predictions': predictions,
+            'sorted_indices': sorted_indices
+        }
     
-    def remove_overlaps(self, detections, iou_threshold=0.5):
-        """Remove overlapping detections using NMS with stricter threshold"""
-        if not detections:
-            return []
+    def annotate_image(self, image):
+        """Add detection result overlay on image"""
+        if self.prediction_result is None:
+            return image
         
-        # Sort by confidence (highest first)
-        detections = sorted(detections, key=lambda x: x['confidence'], reverse=True)
-        
-        filtered = []
-        
-        for det in detections:
-            # Check if this detection overlaps with any already accepted detection
-            overlap = False
-            for existing in filtered:
-                iou = self.calculate_iou(det['bbox'], existing['bbox'])
-                
-                # If significant overlap, only keep if substantially higher confidence
-                if iou > iou_threshold:
-                    overlap = True
-                    break
-                # Also remove if boxes are very close (even with low IoU)
-                elif iou > 0.2 and det['class'] == existing['class']:
-                    if det['confidence'] < existing['confidence'] * 1.1:
-                        overlap = True
-                        break
-            
-            if not overlap:
-                filtered.append(det)
-        
-        return filtered
-    
-    def calculate_iou(self, box1, box2):
-        """Calculate Intersection over Union"""
-        x1_min, y1_min, x1_max, y1_max = box1
-        x2_min, y2_min, x2_max, y2_max = box2
-        
-        inter_x_min = max(x1_min, x2_min)
-        inter_y_min = max(y1_min, y2_min)
-        inter_x_max = min(x1_max, x2_max)
-        inter_y_max = min(y1_max, y2_max)
-        
-        if inter_x_max <= inter_x_min or inter_y_max <= inter_y_min:
-            return 0.0
-        
-        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
-        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
-        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
-        union_area = box1_area + box2_area - inter_area
-        
-        return inter_area / union_area if union_area > 0 else 0.0
-    
-    def draw_detections(self, image, detections):
-        """Draw bounding boxes on image"""
         draw = ImageDraw.Draw(image)
         width, height = image.size
         
+        predicted_class = self.prediction_result['predicted_class']
+        confidence = self.prediction_result['confidence']
+        ball_name = BALL_CLASSES[predicted_class]
+        color = COLORS.get(ball_name, (255, 0, 0))
+        
         # Load font
         try:
-            font_size = max(24, int(height * 0.025))
-            font = ImageFont.truetype("arial.ttf", size=font_size)
+            title_font = ImageFont.truetype("arial.ttf", size=max(40, int(height * 0.06)))
+            subtitle_font = ImageFont.truetype("arial.ttf", size=max(30, int(height * 0.045)))
         except:
             try:
-                font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", size=font_size)
+                title_font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", size=max(40, int(height * 0.06)))
+                subtitle_font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", size=max(30, int(height * 0.045)))
             except:
-                font = ImageFont.load_default()
+                title_font = ImageFont.load_default()
+                subtitle_font = ImageFont.load_default()
         
-        # Draw each detection
-        for idx, det in enumerate(detections):
-            x_min, y_min, x_max, y_max = det['bbox']
-            ball_class = det['class']
-            confidence = det['confidence']
-            ball_name = BALL_CLASSES[ball_class]
-            color = COLORS.get(ball_name, (255, 0, 0))
-            
-            # Draw box with thicker lines
-            for offset in range(5):
-                draw.rectangle(
-                    [x_min-offset, y_min-offset, x_max+offset, y_max+offset], 
-                    outline=color, 
-                    width=1
-                )
-            
-            # Draw label
-            label = f"{ball_name}: {confidence*100:.0f}%"
-            
-            # Get text size
-            bbox = draw.textbbox((0, 0), label, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            
-            # Position label above box
-            label_y = max(0, y_min - text_height - 15)
-            label_x = x_min
-            
-            # Draw black background for text
-            padding = 8
-            draw.rectangle(
-                [label_x - padding, label_y - padding, 
-                 label_x + text_width + padding, label_y + text_height + padding],
-                fill=(0, 0, 0)
-            )
-            
-            # Draw text
-            draw.text((label_x, label_y), label, font=font, fill=color)
+        # Create semi-transparent overlay
+        overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        
+        # Top banner
+        banner_height = int(height * 0.25)
+        overlay_draw.rectangle([(0, 0), (width, banner_height)], fill=(0, 0, 0, 200))
+        
+        # Bottom banner
+        bottom_start = int(height * 0.88)
+        overlay_draw.rectangle([(0, bottom_start), (width, height)], fill=(0, 0, 0, 200))
+        
+        # Blend overlay
+        image = image.convert('RGBA')
+        image = Image.alpha_composite(image, overlay)
+        image = image.convert('RGB')
+        draw = ImageDraw.Draw(image)
+        
+        # Draw main title
+        title_text = f"{ball_name.upper()}"
+        bbox = draw.textbbox((0, 0), title_text, font=title_font)
+        text_width = bbox[2] - bbox[0]
+        text_x = (width - text_width) // 2
+        text_y = int(banner_height * 0.25)
+        
+        # Draw text with outline/shadow
+        for offset in range(-3, 4):
+            for offset2 in range(-3, 4):
+                if offset != 0 or offset2 != 0:
+                    draw.text((text_x + offset, text_y + offset2), title_text, 
+                             font=title_font, fill=(0, 0, 0))
+        draw.text((text_x, text_y), title_text, font=title_font, fill=color)
+        
+        # Draw confidence
+        conf_text = f"Confidence: {confidence*100:.1f}%"
+        bbox = draw.textbbox((0, 0), conf_text, font=subtitle_font)
+        text_width = bbox[2] - bbox[0]
+        text_x = (width - text_width) // 2
+        text_y = int(banner_height * 0.65)
+        
+        for offset in range(-2, 3):
+            for offset2 in range(-2, 3):
+                if offset != 0 or offset2 != 0:
+                    draw.text((text_x + offset, text_y + offset2), conf_text, 
+                             font=subtitle_font, fill=(0, 0, 0))
+        draw.text((text_x, text_y), conf_text, font=subtitle_font, fill=(255, 255, 255))
+        
+        # Draw bottom info
+        info_text = f"Ball Type Detected: {ball_name.upper()}"
+        bbox = draw.textbbox((0, 0), info_text, font=subtitle_font)
+        text_width = bbox[2] - bbox[0]
+        text_x = (width - text_width) // 2
+        text_y = bottom_start + int((height - bottom_start) * 0.3)
+        
+        for offset in range(-2, 3):
+            for offset2 in range(-2, 3):
+                if offset != 0 or offset2 != 0:
+                    draw.text((text_x + offset, text_y + offset2), info_text, 
+                             font=subtitle_font, fill=(0, 0, 0))
+        draw.text((text_x, text_y), info_text, font=subtitle_font, fill=color)
         
         return image
     
     def display_image(self, image):
-        """Display image at full size on canvas"""
+        """Display image resized to fit canvas while maintaining aspect ratio"""
+        # Get canvas dimensions
+        self.root.update()  # Update to get actual canvas size
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        # If canvas not yet sized, use default
+        if canvas_width < 10 or canvas_height < 10:
+            canvas_width = 1100
+            canvas_height = 500
+        
+        # Calculate scaling to fit image in canvas
+        img_width, img_height = image.size
+        scale_w = canvas_width / img_width
+        scale_h = canvas_height / img_height
+        scale = min(scale_w, scale_h, 1.0)  # Don't upscale, only downscale
+        
+        # Resize image if needed
+        if scale < 1.0:
+            new_width = int(img_width * scale)
+            new_height = int(img_height * scale)
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
         # Create PhotoImage
         photo = ImageTk.PhotoImage(image)
         
+        # Center image on canvas
+        img_x = (canvas_width - image.width) // 2
+        img_y = (canvas_height - image.height) // 2
+        
         # Update canvas
         self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        self.canvas.create_image(img_x, img_y, anchor=tk.NW, image=photo)
         self.canvas.image = photo  # Keep reference
         
-        # Update scroll region
-        self.canvas.config(scrollregion=(0, 0, image.width, image.height))
+        # No scroll region needed since image fits
+        self.canvas.config(scrollregion=(0, 0, canvas_width, canvas_height))
     
     def show_results(self):
-        """Display detection results"""
-        if not self.detections:
-            self.results_label.config(text="No balls detected")
+        """Display detailed prediction results"""
+        if self.prediction_result is None:
             return
         
-        # Count by type
-        counts = {}
-        for det in self.detections:
-            ball_name = BALL_CLASSES[det['class']]
-            counts[ball_name] = counts.get(ball_name, 0) + 1
+        predicted_class = self.prediction_result['predicted_class']
+        confidence = self.prediction_result['confidence']
+        all_predictions = self.prediction_result['all_predictions']
+        sorted_indices = self.prediction_result['sorted_indices']
         
-        # Format results
-        result_text = f"Detected {len(self.detections)} ball(s): "
-        result_text += ", ".join([f"{count}x {ball}" for ball, count in sorted(counts.items())])
+        ball_name = BALL_CLASSES[predicted_class]
         
-        self.results_label.config(text=result_text)
+        # Build results text
+        self.results_text.config(state=tk.NORMAL)
+        self.results_text.delete(1.0, tk.END)
+        
+        result = "=" * 70 + "\n"
+        result += "🎯 BALL IDENTIFICATION RESULTS\n"
+        result += "=" * 70 + "\n\n"
+        
+        result += f"🏆 IDENTIFIED BALL TYPE: {ball_name.upper()}\n"
+        result += f"📊 Confidence Score: {confidence*100:.2f}%\n"
+        result += f"✓ Prediction Accuracy: {'HIGH' if confidence > 0.7 else 'MEDIUM' if confidence > 0.5 else 'LOW'}\n\n"
+        
+        result += "=" * 70 + "\n"
+        result += "📋 ALL PREDICTIONS (Ranked by Confidence):\n"
+        result += "=" * 70 + "\n\n"
+        
+        result += f"{'Rank':<6} {'Ball Type':<20} {'Confidence':<12} {'Bar'}\n"
+        result += "-" * 70 + "\n"
+        
+        for rank, idx in enumerate(sorted_indices, 1):
+            ball_type = BALL_CLASSES[idx]
+            conf = all_predictions[idx] * 100
+            bar_length = int(conf / 5)
+            bar = "█" * bar_length + "░" * (20 - bar_length)
+            
+            marker = "→" if idx == predicted_class else " "
+            result += f"{marker} {rank:<4} {ball_type:<20} {conf:>6.2f}%    [{bar}]\n"
+        
+        result += "\n" + "=" * 70 + "\n"
+        result += "💡 INTERPRETATION:\n"
+        result += "=" * 70 + "\n"
+        
+        if confidence >= 0.8:
+            result += "✓ Very High Confidence - The model is very certain about this prediction.\n"
+        elif confidence >= 0.6:
+            result += "✓ High Confidence - The model is quite confident about this prediction.\n"
+        elif confidence >= 0.4:
+            result += "⚠ Medium Confidence - The model has some uncertainty.\n"
+        else:
+            result += "⚠ Low Confidence - The model is uncertain. Try a clearer image.\n"
+        
+        # Show top 3 predictions
+        result += "\nTop 3 Predictions:\n"
+        for i, idx in enumerate(sorted_indices[:3], 1):
+            result += f"  {i}. {BALL_CLASSES[idx]}: {all_predictions[idx]*100:.2f}%\n"
+        
+        result += "\n" + "=" * 70 + "\n"
+        
+        self.results_text.insert(1.0, result)
+        self.results_text.config(state=tk.DISABLED)
 
 
 def main():

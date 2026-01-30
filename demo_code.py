@@ -20,7 +20,7 @@ BALL_CLASSES = [
 ]
 
 IMAGE_SIZE = (192, 192)  # Must match training size
-MODEL_PATH = 'Ball_sport_classifier.h5'
+MODEL_PATH = 'Ball_sport_classifier_old.h5'
 CONFIDENCE_THRESHOLD = 0.3  # Lower threshold for more detections
 
 # Colors for display (BGR format for OpenCV)
