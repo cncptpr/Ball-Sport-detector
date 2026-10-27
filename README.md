@@ -227,7 +227,10 @@ It holds out the entire `IMG_5158.MOV` clip for validation and saves the best
 model to `models/ball_detector.keras`. Lower `--epochs` or `--batch-size` to
 reduce laptop load. The older `training_model.py` remains for the separate
 six-class sports classifier described below. The detector takes RGB images
-resized to 192×256 and scaled to [0, 1], and returns a 48×64 ball-center heatmap.
+resized to 384×512 and scaled to [0, 1], and returns a 96×128 ball-center heatmap.
+It uses frozen ImageNet MobileNetV2 features with a small trained detection head;
+the first run downloads the pretrained weights. The default render confidence
+threshold is conservative to favor fewer false positives; lower it for more recall.
 To inspect predictions on the held-out clip, run
 `.venv/bin/python render_detections.py`; it writes
 `reports/validation_detections.jpg` (green = labels, red = detections) and prints

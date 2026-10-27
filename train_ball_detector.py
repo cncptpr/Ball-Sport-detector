@@ -16,16 +16,19 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent
 IMAGE_DIR = ROOT / "data" / "extract"
 LABELS_FILE = ROOT / "data" / "manuel_labels.json"
-INPUT_SIZE = (256, 192)  # height, width; preserve the source 3:4 aspect ratio
+INPUT_SIZE = (512, 384)  # height, width; retain small balls after resizing
 OUTPUT_STRIDE = 4
 OUTPUT_SIZE = (INPUT_SIZE[0] // OUTPUT_STRIDE, INPUT_SIZE[1] // OUTPUT_STRIDE)
 
 
-def load_split():
+def load_split(validation_only=False):
     labels = json.loads(LABELS_FILE.read_text())["images"]
     train_images, train_maps, train_centers = [], [], []
     val_images, val_maps, val_centers = [], [], []
     for relative_path, annotation in sorted(labels.items()):
+        is_validation = relative_path.startswith("IMG_5158.MOV/")
+        if validation_only and not is_validation:
+            continue
         path = IMAGE_DIR / relative_path
         if not path.is_file():
             raise FileNotFoundError(f"Image from labels is missing: {path}")
@@ -48,11 +51,12 @@ def load_split():
             x = ball["x"] * OUTPUT_SIZE[1] / annotation["width"]
             y = ball["y"] * OUTPUT_SIZE[0] / annotation["height"]
             centers.append((x, y))
-            cx, cy = int(round(x)), int(round(y))
+            cx = min(OUTPUT_SIZE[1] - 1, max(0, int(round(x))))
+            cy = min(OUTPUT_SIZE[0] - 1, max(0, int(round(y))))
             left, right = max(0, cx - 3), min(OUTPUT_SIZE[1], cx + 4)
             top, bottom = max(0, cy - 3), min(OUTPUT_SIZE[0], cy + 4)
             yy, xx = np.mgrid[top:bottom, left:right]
-            gaussian = np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / 2.0)
+            gaussian = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / 2.0)
             heatmap[top:bottom, left:right] = np.maximum(
                 heatmap[top:bottom, left:right], gaussian
             )
@@ -60,14 +64,14 @@ def load_split():
         # Hold out an entire clip so adjacent video frames cannot leak into validation.
         destination = (
             (val_images, val_maps, val_centers)
-            if relative_path.startswith("IMG_5158.MOV/")
+            if is_validation
             else (train_images, train_maps, train_centers)
         )
         destination[0].append(image)
         destination[1].append(heatmap[..., np.newaxis])
         destination[2].append(centers)
 
-    if not train_images or not val_images:
+    if not val_images or (not validation_only and not train_images):
         raise ValueError("Expected training clips and the IMG_5158.MOV validation clip")
     return (
         np.asarray(train_images), np.asarray(train_maps), train_centers,
@@ -77,23 +81,33 @@ def load_split():
 
 def build_model():
     inputs = tf.keras.Input((*INPUT_SIZE, 3))
-    x = tf.keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(inputs)
-    x = tf.keras.layers.Conv2D(32, 3, strides=2, padding="same", activation="relu")(x)
-    x = tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu")(x)
+    normalized = tf.keras.layers.Rescaling(scale=2.0, offset=-1.0)(inputs)
+    base = tf.keras.applications.MobileNetV2(
+        input_shape=(*INPUT_SIZE, 3), include_top=False, weights="imagenet"
+    )
+    base.trainable = False
+    feature_extractor = tf.keras.Model(
+        base.input, base.get_layer("block_3_expand_relu").output
+    )
+    x = feature_extractor(normalized, training=False)
+    x = tf.keras.layers.Conv2D(32, 1, activation="relu")(x)
     x = tf.keras.layers.Conv2D(24, 3, padding="same", activation="relu")(x)
     outputs = tf.keras.layers.Conv2D(1, 1, activation="sigmoid")(x)
     model = tf.keras.Model(inputs, outputs)
 
-    def weighted_bce(y_true, y_pred):
+    def hard_negative_loss(y_true, y_pred):
         y_pred = tf.clip_by_value(y_pred, 1e-6, 1.0 - 1e-6)
         bce = -(y_true * tf.math.log(y_pred) + (1.0 - y_true) * tf.math.log(1.0 - y_pred))
-        return tf.reduce_mean(bce * (1.0 + 50.0 * y_true))
+        positive_loss = tf.reduce_sum(bce * y_true) / tf.maximum(tf.reduce_sum(y_true), 1.0)
+        negative_scores = tf.reshape(y_pred * (1.0 - y_true), (tf.shape(y_pred)[0], -1))
+        hardest = tf.math.top_k(negative_scores, k=64).values
+        return positive_loss + 5.0 * tf.reduce_mean(hardest)
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss=weighted_bce)
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss=hard_negative_loss)
     return model
 
 
-def find_peaks(heatmap, threshold=0.2, nms_radius=3):
+def find_peaks(heatmap, threshold=0.4, nms_radius=6):
     pooled = tf.nn.max_pool2d(heatmap[None, ..., None], 3, 1, "SAME").numpy()[0, ..., 0]
     ys, xs = np.where((heatmap == pooled) & (heatmap >= threshold))
     candidates = sorted(
@@ -106,7 +120,7 @@ def find_peaks(heatmap, threshold=0.2, nms_radius=3):
     return selected
 
 
-def validation_scores(model, images, centers, threshold=0.2):
+def validation_scores(model, images, centers, threshold=0.4):
     heatmaps = model.predict(images, verbose=0)[..., 0]
     matched = false_positives = targets = 0
     for heatmap, truth in zip(heatmaps, centers):
@@ -124,7 +138,8 @@ def validation_scores(model, images, centers, threshold=0.2):
         targets += len(truth)
     precision = matched / max(matched + false_positives, 1)
     recall = matched / max(targets, 1)
-    return precision, recall, 2 * precision * recall / max(precision + recall, 1e-9)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-9)
+    return precision, recall, f1, false_positives, matched
 
 
 def main():
@@ -160,7 +175,7 @@ def main():
         args.output, monitor="val_loss", save_best_only=True, verbose=1
     )
     stop = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=3, restore_best_weights=True
+        monitor="val_loss", min_delta=1e-5, patience=3, restore_best_weights=True
     )
     model.fit(
         train,
@@ -171,9 +186,13 @@ def main():
         verbose=2,
     )
     model.save(args.output)
-    precision, recall, f1 = validation_scores(model, val_x, val_centers)
-    print(f"Validation detections (12px tolerance): precision={precision:.3f}, "
-          f"recall={recall:.3f}, F1={f1:.3f}")
+    precision, recall, f1, false_positives, true_positives = validation_scores(
+        model, val_x, val_centers
+    )
+    print(
+        f"Validation @ 0.40 (45px tolerance): TP={true_positives}, FP={false_positives}, "
+        f"precision={precision:.3f}, recall={recall:.3f}, F1={f1:.3f}"
+    )
     print(f"Saved model: {args.output}")
 
 

@@ -17,14 +17,14 @@ MODEL_FILE = ROOT / "models" / "ball_detector.keras"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.4)
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--output", type=Path, default=ROOT / "reports" / "validation_detections.jpg")
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1 or args.limit < 1:
         parser.error("--threshold must be in [0, 1] and --limit must be positive")
 
-    _, _, _, images, _, centers = load_split()
+    _, _, _, images, _, centers = load_split(validation_only=True)
     model = tf.keras.models.load_model(MODEL_FILE, compile=False)
     heatmaps = model.predict(images, verbose=0)[..., 0]
     predictions = [find_peaks(hm, args.threshold) for hm in heatmaps]
@@ -36,9 +36,10 @@ def main():
         f"Validation @ {args.threshold:.2f}: TP={true_positives}, FP={false_positives}, "
         f"precision={precision:.3f}, recall={recall:.3f}, F1={f1:.3f}"
     )
-    for threshold in (0.2, 0.4, 0.6, 0.8, 0.9):
+    for threshold in (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
         result = score(centers, [find_peaks(hm, threshold) for hm in heatmaps])
-        print(f"  threshold {threshold:.1f}: precision={result[0]:.3f}, recall={result[1]:.3f}, F1={result[2]:.3f}")
+        print(f"  threshold {threshold:.3f}: TP={result[4]}, FP={result[3]}, "
+              f"precision={result[0]:.3f}, recall={result[1]:.3f}, F1={result[2]:.3f}")
 
     cols, tile_w, tile_h, header_h = 4, 384, 512, 26
     count = min(args.limit, len(paths))
@@ -65,7 +66,7 @@ def main():
             px = x0 + round(x * tile_w / OUTPUT_SIZE[1])
             py = y0 + header_h + round(y * tile_h / OUTPUT_SIZE[0])
             draw.ellipse((px - 7, py - 7, px + 7, py + 7), outline="#ff3030", width=3)
-            draw.text((px + 8, py - 8), f"{confidence:.1f}", fill="#ff6060")
+            draw.text((px + 8, py - 8), f"{confidence:.2f}", fill="#ff6060")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(args.output, quality=90)
