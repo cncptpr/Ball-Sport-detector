@@ -18,59 +18,68 @@ MODEL_FILE = ROOT / "models" / "ball_detector.keras"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--threshold", type=float, default=0.4)
-    parser.add_argument("--limit", type=int, default=12)
-    parser.add_argument("--output", type=Path, default=ROOT / "reports" / "validation_detections.jpg")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "reports" / "detections")
     args = parser.parse_args()
-    if not 0 <= args.threshold <= 1 or args.limit < 1:
-        parser.error("--threshold must be in [0, 1] and --limit must be positive")
+    if not 0 <= args.threshold <= 1:
+        parser.error("--threshold must be in [0, 1]")
 
-    _, _, _, images, _, centers = load_split(validation_only=True)
+    train_images, _, train_centers, val_images, _, val_centers = load_split()
+    images = np.concatenate((train_images, val_images))
+    centers = train_centers + val_centers
     model = tf.keras.models.load_model(MODEL_FILE, compile=False)
-    heatmaps = model.predict(images, verbose=0)[..., 0]
+    heatmaps = model.predict(images, batch_size=8, verbose=0)[..., 0]
     predictions = [find_peaks(hm, args.threshold) for hm in heatmaps]
 
     labels = json.loads(LABELS_FILE.read_text())["images"]
-    paths = sorted(path for path in labels if path.startswith("IMG_5158.MOV/"))
-    precision, recall, f1, false_positives, true_positives = score(centers, predictions)
+    train_paths = sorted(path for path in labels if not path.startswith("IMG_5158.MOV/"))
+    val_paths = sorted(path for path in labels if path.startswith("IMG_5158.MOV/"))
+    paths = train_paths + val_paths
+    if len(paths) != len(images):
+        raise ValueError("Rendered frame order does not match the labeled dataset")
+
+    val_predictions = predictions[len(train_paths):]
+    precision, recall, f1, false_positives, true_positives = score(val_centers, val_predictions)
     print(
         f"Validation @ {args.threshold:.2f}: TP={true_positives}, FP={false_positives}, "
         f"precision={precision:.3f}, recall={recall:.3f}, F1={f1:.3f}"
     )
     for threshold in (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
-        result = score(centers, [find_peaks(hm, threshold) for hm in heatmaps])
+        result = score(val_centers, [find_peaks(hm, threshold) for hm in heatmaps[len(train_paths):]])
         print(f"  threshold {threshold:.3f}: TP={result[4]}, FP={result[3]}, "
               f"precision={result[0]:.3f}, recall={result[1]:.3f}, F1={result[2]:.3f}")
 
-    cols, tile_w, tile_h, header_h = 4, 384, 512, 26
-    count = min(args.limit, len(paths))
-    indices = np.linspace(0, len(paths) - 1, count, dtype=int)
-    sheet = Image.new("RGB", (cols * tile_w, ((count + cols - 1) // cols) * (tile_h + header_h)), "#202020")
-    draw = ImageDraw.Draw(sheet)
-    for panel, index in enumerate(indices):
-        row, col = divmod(panel, cols)
-        x0, y0 = col * tile_w, row * (tile_h + header_h)
-        path = IMAGE_DIR / paths[index]
-        with Image.open(path) as frame:
-            tile = frame.convert("RGB").resize((tile_w, tile_h))
-        sheet.paste(tile, (x0, y0 + header_h))
-        truth = centers[index]
-        found = predictions[index]
-        draw.text((x0 + 5, y0 + 5), f"{path.name}  GT:{len(truth)} pred:{len(found)}", fill="white")
+    count = 0
+    for relative_path, truth, found in zip(paths, centers, predictions):
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Unsafe image path in labels: {relative_path}")
+        image_path = IMAGE_DIR / relative
+        with Image.open(image_path) as source:
+            frame = source.convert("RGB")
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle((0, 0, frame.width, 38), fill="#202020")
+        draw.text(
+            (10, 10),
+            f"{relative_path} | GT {len(truth)} | detections {len(found)} | threshold {args.threshold:.2f}",
+            fill="white",
+        )
         for x, y in truth:
-            px = x0 + round(x * tile_w / OUTPUT_SIZE[1])
-            py = y0 + header_h + round(y * tile_h / OUTPUT_SIZE[0])
-            draw.ellipse((px - 8, py - 8, px + 8, py + 8), outline="#00ff55", width=3)
-            draw.line((px - 10, py, px + 10, py), fill="#00ff55", width=2)
-            draw.line((px, py - 10, px, py + 10), fill="#00ff55", width=2)
+            px = round(x * frame.width / OUTPUT_SIZE[1])
+            py = round(y * frame.height / OUTPUT_SIZE[0])
+            draw.line((px - 18, py, px + 18, py), fill="#00ff55", width=4)
+            draw.line((px, py - 18, px, py + 18), fill="#00ff55", width=4)
         for confidence, x, y in found:
-            px = x0 + round(x * tile_w / OUTPUT_SIZE[1])
-            py = y0 + header_h + round(y * tile_h / OUTPUT_SIZE[0])
-            draw.ellipse((px - 7, py - 7, px + 7, py + 7), outline="#ff3030", width=3)
-            draw.text((px + 8, py - 8), f"{confidence:.2f}", fill="#ff6060")
+            px = round(x * frame.width / OUTPUT_SIZE[1])
+            py = round(y * frame.height / OUTPUT_SIZE[0])
+            draw.line((px - 12, py, px + 12, py), fill="#ff3030", width=4)
+            draw.line((px, py - 12, px, py + 12), fill="#ff3030", width=4)
+            draw.text((px + 14, py - 12), f"{confidence:.2f}", fill="#ff6060")
+        output_path = args.output_dir / relative.with_suffix(".jpg")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        frame.save(output_path, quality=90)
+        count += 1
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(args.output, quality=90)
-    print(f"Saved contact sheet: {args.output}")
+    print(f"Saved {count} individual frame images under {args.output_dir}")
 
 
 def score(centers, predictions, tolerance=3):

@@ -54,6 +54,7 @@ MANIFEST
 weights/
 checkpoints/
 models/
+reports/detections/
 
 # Data Files
 *.csv

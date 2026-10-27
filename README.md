@@ -233,8 +233,15 @@ the first run downloads the pretrained weights. The default render confidence
 threshold is conservative to favor fewer false positives; lower it for more recall.
 To inspect predictions on the held-out clip, run
 `.venv/bin/python render_detections.py`; it writes
-`reports/validation_detections.jpg` (green = labels, red = detections) and prints
-precision/recall for several confidence thresholds.
+one full-resolution JPEG per labeled frame under
+`reports/detections/<clip>/` (green crosses = labels, red crosses = detections)
+and prints precision/recall for several thresholds. The default `0.4` threshold
+favors precision; use `--threshold 0.3` for more detections.
+
+The current labels provide centers only, so this model does not predict ball
+radius or camera distance. Radius requires size annotations; metric distance
+also requires a known ball size and camera calibration (or a calibrated floor
+plane for balls resting on it).
 
 ### Step 1: Prepare Your Dataset
 
