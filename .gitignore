@@ -58,7 +58,6 @@ reports/detections/
 
 # Data Files
 *.csv
-data/
 datasets/
 
 # Jupyter Notebook
