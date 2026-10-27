@@ -206,6 +206,29 @@ pip install -r requirements.txt
 
 ## 🎯 Usage
 
+### Train a detector on the included video labels
+
+The frames in `data/extract/` and center annotations in `data/manuel_labels.json`
+are an object-localization dataset, not the six image classes used by
+`training_model.py`. With Nix, enter the Python 3.12 FHS environment, create a
+local virtual environment, and install the Python wheels there:
+
+```bash
+nix develop path:.
+uv venv --python "$UV_PYTHON" .venv
+uv pip install --python .venv/bin/python tensorflow-cpu pillow
+.venv/bin/python train_ball_detector.py --epochs 12
+```
+
+Alternatively, use Python 3.10–3.12 and install `tensorflow-cpu` and `pillow`
+with pip.
+
+It holds out the entire `IMG_5158.MOV` clip for validation and saves the best
+model to `models/ball_detector.keras`. Lower `--epochs` or `--batch-size` to
+reduce laptop load. The older `training_model.py` remains for the separate
+six-class sports classifier described below. The detector takes RGB images
+resized to 192×256 and scaled to [0, 1], and returns a 48×64 ball-center heatmap.
+
 ### Step 1: Prepare Your Dataset
 
 Organize your dataset in the following structure:
