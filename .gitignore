@@ -53,7 +53,7 @@ MANIFEST
 *.pth
 weights/
 checkpoints/
-models/
+# models/
 reports/detections/
 
 # Data Files
