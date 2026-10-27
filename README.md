@@ -208,7 +208,8 @@ pip install -r requirements.txt
 
 ### Train a detector on the included video labels
 
-The frames in `data/extract/` and center annotations in `data/manuel_labels.json`
+The frames in `data/extract/` and center/radius annotations in
+`data/manuel_labels.json` (also accepted as `manual_labels.json`)
 are an object-localization dataset, not the six image classes used by
 `training_model.py`. With Nix, enter the Python 3.12 FHS environment, create a
 local virtual environment, and install the Python wheels there:
@@ -216,19 +217,21 @@ local virtual environment, and install the Python wheels there:
 ```bash
 nix develop path:.
 uv venv --python "$UV_PYTHON" .venv
-uv pip install --python .venv/bin/python tensorflow-cpu pillow
+uv pip install --python .venv/bin/python "tensorflow[and-cuda]" pillow
 .venv/bin/python train_ball_detector.py --epochs 12
 ```
 
-Alternatively, use Python 3.10–3.12 and install `tensorflow-cpu` and `pillow`
-with pip.
+Alternatively, use Python 3.10–3.12 and install `tensorflow[and-cuda]` and
+`pillow` with pip. Run inside this repository's FHS environment so the
+dynamic libraries and NVIDIA driver are available.
 
 It holds out the entire `IMG_5158.MOV` clip for validation and saves the best
 model to `models/ball_detector.keras`. Lower `--epochs` or `--batch-size` to
 reduce laptop load. The older `training_model.py` remains for the separate
 six-class sports classifier described below. The detector takes RGB images
 resized to 384×512 and scaled to [0, 1], and returns a 96×128 ball-center heatmap.
-It uses frozen ImageNet MobileNetV2 features with a small trained detection head;
+It uses frozen ImageNet MobileNetV2 features with a larger decoder and separate
+center and radius prediction heads;
 the first run downloads the pretrained weights. The default render confidence
 threshold is conservative to favor fewer false positives; lower it for more recall.
 To inspect predictions on the held-out clip, run
@@ -238,8 +241,17 @@ one full-resolution JPEG per labeled frame under
 and prints precision/recall for several thresholds. The default `0.4` threshold
 favors precision; use `--threshold 0.3` for more detections.
 
-The current labels provide centers only, so this model does not predict ball
-radius or camera distance. Radius requires size annotations; metric distance
+The timed GPU runs can be kept side by side:
+
+```bash
+nix run .#fhs -- -c '.venv-gpu/bin/python train_ball_detector.py --epochs 1000 --minutes 20 --output models/ball_detector_20min.keras'
+nix run .#fhs -- -c '.venv-gpu/bin/python train_ball_detector.py --epochs 1000 --minutes 60 --output models/ball_detector_1h.keras'
+```
+
+Use `render_detections.py --model <path>` to inspect either model; predicted
+radii are drawn around detected centers.
+
+The labels provide pixel centers and radii, so this model predicts both. Metric distance
 also requires a known ball size and camera calibration (or a calibrated floor
 plane for balls resting on it).
 

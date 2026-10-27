@@ -18,23 +18,26 @@ MODEL_FILE = ROOT / "models" / "ball_detector.keras"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--threshold", type=float, default=0.4)
+    parser.add_argument("--model", type=Path, default=MODEL_FILE)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports" / "detections")
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("--threshold must be in [0, 1]")
 
-    train_images, _, train_centers, val_images, _, val_centers = load_split()
-    images = np.concatenate((train_images, val_images))
+    train_images, _, train_centers, _, val_images, _, val_centers, _ = load_split()
     centers = train_centers + val_centers
-    model = tf.keras.models.load_model(MODEL_FILE, compile=False)
-    heatmaps = model.predict(images, batch_size=8, verbose=0)[..., 0]
+    model = tf.keras.models.load_model(args.model, compile=False)
+    train_center_maps, train_radius_maps = model.predict(train_images, batch_size=4, verbose=0)
+    val_center_maps, val_radius_maps = model.predict(val_images, batch_size=4, verbose=0)
+    heatmaps = np.concatenate((train_center_maps[..., 0], val_center_maps[..., 0]))
+    radius_maps = np.concatenate((train_radius_maps[..., 0], val_radius_maps[..., 0]))
     predictions = [find_peaks(hm, args.threshold) for hm in heatmaps]
 
     labels = json.loads(LABELS_FILE.read_text())["images"]
     train_paths = sorted(path for path in labels if not path.startswith("IMG_5158.MOV/"))
     val_paths = sorted(path for path in labels if path.startswith("IMG_5158.MOV/"))
     paths = train_paths + val_paths
-    if len(paths) != len(images):
+    if len(paths) != len(centers):
         raise ValueError("Rendered frame order does not match the labeled dataset")
 
     val_predictions = predictions[len(train_paths):]
@@ -73,7 +76,9 @@ def main():
             py = round(y * frame.height / OUTPUT_SIZE[0])
             draw.line((px - 12, py, px + 12, py), fill="#ff3030", width=4)
             draw.line((px, py - 12, px, py + 12), fill="#ff3030", width=4)
-            draw.text((px + 14, py - 12), f"{confidence:.2f}", fill="#ff6060")
+            radius = radius_maps[count, y, x] * frame.width / OUTPUT_SIZE[1]
+            draw.ellipse((px - radius, py - radius, px + radius, py + radius), outline="#ff6060", width=3)
+            draw.text((px + 14, py - 12), f"{confidence:.2f} r={radius:.1f}", fill="#ff6060")
         output_path = args.output_dir / relative.with_suffix(".jpg")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         frame.save(output_path, quality=90)
