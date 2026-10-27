@@ -228,6 +228,10 @@ model to `models/ball_detector.keras`. Lower `--epochs` or `--batch-size` to
 reduce laptop load. The older `training_model.py` remains for the separate
 six-class sports classifier described below. The detector takes RGB images
 resized to 192×256 and scaled to [0, 1], and returns a 48×64 ball-center heatmap.
+To inspect predictions on the held-out clip, run
+`.venv/bin/python render_detections.py`; it writes
+`reports/validation_detections.jpg` (green = labels, red = detections) and prints
+precision/recall for several confidence thresholds.
 
 ### Step 1: Prepare Your Dataset
 

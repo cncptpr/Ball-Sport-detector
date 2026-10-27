@@ -93,18 +93,25 @@ def build_model():
     return model
 
 
-def validation_scores(model, images, centers):
-    heatmaps = model.predict(images, verbose=0)
-    pooled = tf.nn.max_pool2d(heatmaps, 3, 1, "SAME").numpy()[..., 0]
+def find_peaks(heatmap, threshold=0.2, nms_radius=3):
+    pooled = tf.nn.max_pool2d(heatmap[None, ..., None], 3, 1, "SAME").numpy()[0, ..., 0]
+    ys, xs = np.where((heatmap == pooled) & (heatmap >= threshold))
+    candidates = sorted(
+        ((float(heatmap[y, x]), x, y) for y, x in zip(ys, xs)), reverse=True
+    )
+    selected = []
+    for score, x, y in candidates:
+        if all((x - px) ** 2 + (y - py) ** 2 >= nms_radius**2 for _, px, py in selected):
+            selected.append((score, x, y))
+    return selected
+
+
+def validation_scores(model, images, centers, threshold=0.2):
+    heatmaps = model.predict(images, verbose=0)[..., 0]
     matched = false_positives = targets = 0
-    for heatmap, local_maxima, truth in zip(heatmaps[..., 0], pooled, centers):
-        ys, xs = np.where((heatmap == local_maxima) & (heatmap >= 0.2))
-        # Keep local maxima only and match strongest candidates to annotated centers.
-        candidates = sorted(
-            ((float(heatmap[y, x]), x, y) for y, x in zip(ys, xs)), reverse=True
-        )
+    for heatmap, truth in zip(heatmaps, centers):
         used = set()
-        for _, x, y in candidates:
+        for _, x, y in find_peaks(heatmap, threshold):
             nearest = min(
                 ((x - gx) ** 2 + (y - gy) ** 2, i)
                 for i, (gx, gy) in enumerate(truth) if i not in used
